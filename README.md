@@ -11,8 +11,10 @@
 * Telegram 私聊通知
 * Telegram @你 通知
 * Telegram 回复你 通知
+* 未静音群组普通消息通知
 * 通过 Bark 推送到 iPhone
 * Telegram 收藏夹远程控制开关
+* Telegram 收藏夹远程控制是否显示消息内容
 * 点击通知直接打开 Telegram
 
 适用于：
@@ -53,12 +55,14 @@
 * Telegram 私聊
 * 群组 @你
 * 回复你的消息
+* 未静音群组普通消息
 
 ---
 
 ### 不会推送
 
 * 普通群消息
+* 已静音群组普通消息
 * 无关频道消息
 * 你自己发出的消息
 
@@ -102,6 +106,38 @@ Telegram 收藏夹 / Saved Messages
 
 ---
 
+### 开启未静音群组普通消息推送
+
+```text
+/group_on
+```
+
+---
+
+### 关闭未静音群组普通消息推送
+
+```text
+/group_off
+```
+
+---
+
+### 显示推送消息内容
+
+```text
+/show_msg
+```
+
+---
+
+### 隐藏推送消息内容
+
+```text
+/hide_msg
+```
+
+---
+
 ### 查看帮助
 
 ```text
@@ -116,6 +152,8 @@ Telegram 收藏夹 / Saved Messages
 * 手机即可控制
 * 状态永久保存
 * VPS 重启后依然生效
+* 支持随时切换是否显示消息内容
+* 支持随时切换未静音群组普通消息推送
 
 状态保存在：
 
@@ -161,7 +199,7 @@ source venv/bin/activate
 ## 3. 安装依赖
 
 ```bash
-pip install -U telethon aiohttp python-dotenv
+pip install -U telethon aiohttp python-dotenv PySocks aiohttp-socks
 ```
 
 ---
@@ -246,8 +284,21 @@ TG_SESSION=tg_bark
 
 BARK_KEY=你的Bark_Key
 BARK_SERVER=https://api.day.app
+BARK_ICON=https://cdn.nodeimage.com/i/BsrCijXH0NbRmtIbkXrdrPMdTbZxi1vG.webp
 
 MY_USERNAME=你的Telegram用户名
+
+# 可选：默认开启未静音群组普通消息推送
+PUSH_UNMUTED_GROUPS=true
+
+# 可选：默认显示消息内容；如需隐私保护可改为 true
+HIDE_MESSAGE_CONTENT=false
+
+# 可选：是否推送自己发出的消息
+PUSH_SELF_MESSAGES=false
+
+# 可选：推送正文最大长度
+MAX_BODY_LEN=500
 ```
 
 注意：
@@ -260,6 +311,50 @@ MY_USERNAME 不要带 @
 
 ```env
 MY_USERNAME=test123
+```
+
+---
+
+## Hysteria2 代理配置
+
+程序已支持直接读取 Hysteria2 本地代理端口。
+
+注意：Hysteria2 客户端需要先运行，并开放本地 HTTP 或 SOCKS5 代理端口，例如：
+
+```text
+socks5://127.0.0.1:1080
+```
+
+如果希望 Telegram 登录连接和 Bark 推送都走同一个 Hysteria2 代理，在 `.env` 里加入：
+
+```env
+HYSTERIA2_PROXY=socks5://127.0.0.1:1080
+```
+
+更推荐使用 `socks5h`，让 DNS 也走代理：
+
+```env
+HYSTERIA2_PROXY=socks5h://127.0.0.1:1080
+```
+
+也可以分别配置：
+
+```env
+TG_PROXY_URL=socks5://127.0.0.1:1080
+BARK_PROXY_URL=socks5://127.0.0.1:1080
+```
+
+支持格式：
+
+```text
+socks5://127.0.0.1:1080
+http://127.0.0.1:8080
+```
+
+如代理带用户名密码：
+
+```env
+HYSTERIA2_PROXY=socks5://user:pass@127.0.0.1:1080
 ```
 
 ---
@@ -328,22 +423,79 @@ tg_bark.session
 
 当前：
 
-* Telegram 图标
+* Telegram 图标，可通过 `BARK_ICON` 自定义
 * 自定义声音
 * 点击通知打开 Telegram
-* 不显示真实消息内容
-* 保护隐私
+* 可显示真实消息内容
+* 可隐藏真实消息内容保护隐私
 
-通知内容：
+私聊显示方式：
 
 ```text
-Telegram｜私聊
-用户名: 点击查看
+标题：发送人｜私聊
+内容：消息内容
+```
+
+群聊显示方式：
+
+```text
+标题：群名｜未静音群组
+内容：发送人: 消息内容
+```
+
+隐藏消息内容后：
+
+```text
+标题：发送人或群名｜触发原因
+内容：点击查看
+```
+
+可以在 Telegram 收藏夹里发送：
+
+```text
+/show_msg
+/hide_msg
+```
+
+来切换是否显示消息内容。
+
+---
+
+# 十一、收藏夹命令完整列表
+
+所有命令只在 Telegram 收藏夹 / Saved Messages 中生效。
+
+```text
+/on        开启 Bark 推送
+/off       关闭 Bark 推送
+/status    查看完整状态
+/group_on  开启未静音群组普通消息推送
+/group_off 关闭未静音群组普通消息推送
+/show_msg  推送显示消息内容
+/hide_msg  推送隐藏消息内容
+/help      查看帮助
+```
+
+`/status` 会显示：
+
+```text
+Telegram Bark 当前状态：
+Bark 推送：开启/关闭
+未静音群组普通消息：开启/关闭
+推送消息内容：显示/隐藏
+自己发出的消息：推送/忽略
+最大内容长度：500
+Telegram 代理：...
+Bark 代理：...
+Bark 服务端：...
+Bark 图标：...
+Session：...
+状态文件：...
 ```
 
 ---
 
-# 十一、后台永久运行
+# 十二、后台永久运行
 
 ## 1. 创建 systemd 服务
 
@@ -403,7 +555,7 @@ sudo systemctl start tg-bark
 
 ---
 
-# 十二、常用命令
+# 十三、常用命令
 
 ## 查看状态
 
@@ -461,7 +613,7 @@ sudo systemctl disable tg-bark
 
 ---
 
-# 十三、查看日志（非常重要）
+# 十四、查看日志（非常重要）
 
 实时查看：
 
@@ -493,7 +645,7 @@ journalctl -u tg-bark --since today
 
 ---
 
-# 十四、修改代码后如何生效
+# 十五、修改代码后如何生效
 
 编辑：
 
@@ -515,7 +667,7 @@ journalctl -u tg-bark -f
 
 ---
 
-# 十五、安全建议
+# 十六、安全建议
 
 ## 1. 保护 .env
 
@@ -547,7 +699,7 @@ BARK_KEY
 
 ---
 
-# 十六、升级依赖
+# 十七、升级依赖
 
 进入目录：
 
@@ -559,12 +711,12 @@ source venv/bin/activate
 升级：
 
 ```bash
-pip install -U telethon aiohttp python-dotenv
+pip install -U telethon aiohttp python-dotenv PySocks aiohttp-socks
 ```
 
 ---
 
-# 十七、完全删除项目
+# 十八、完全删除项目
 
 停止服务：
 
@@ -588,7 +740,7 @@ rm -rf ~/tg-bark
 
 ---
 
-# 十八、故障排查
+# 十九、故障排查
 
 ## 1. 服务启动失败
 
@@ -639,7 +791,7 @@ python main.py
 
 ---
 
-# 十九、当前实现特点
+# 二十、当前实现特点
 
 ## 优点
 
@@ -652,10 +804,12 @@ python main.py
 * 后台守护
 * 开机自启
 * 手机远程控制推送
+* 手机远程控制未静音群组推送
+* 手机远程控制消息内容显示/隐藏
 
 ---
 
-# 二十、推荐 VPS 配置
+# 二十一、推荐 VPS 配置
 
 当前 Oracle ARM：
 
@@ -676,7 +830,7 @@ CPU：极低
 
 ---
 
-# 二十一、作者备注
+# 二十二、作者备注
 
 这是一个：
 
@@ -698,7 +852,7 @@ Telegram -> Bark -> iPhone
 * iPhone 原生通知体验
 * 长期后台稳定运行
 * 手机远程控制开关
-* 尽量保护隐私
+* 可选择显示消息内容或隐藏内容保护隐私
 
 ```
 ```

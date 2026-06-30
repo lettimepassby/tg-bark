@@ -33,12 +33,14 @@ TG_SESSION = os.getenv("TG_SESSION", "tg_bark")
 
 BARK_KEY = os.getenv("BARK_KEY", "")
 BARK_SERVER = os.getenv("BARK_SERVER", "https://api.day.app").rstrip("/")
+BARK_ICON = os.getenv("BARK_ICON", "https://cdn.nodeimage.com/i/BsrCijXH0NbRmtIbkXrdrPMdTbZxi1vG.webp")
 
 MY_USERNAME = os.getenv("MY_USERNAME", "").lstrip("@").lower()
 
 MAX_BODY_LEN = int(os.getenv("MAX_BODY_LEN", "500"))
 PUSH_SELF_MESSAGES = os.getenv("PUSH_SELF_MESSAGES", "false").lower() == "true"
 DEFAULT_PUSH_UNMUTED_GROUPS = os.getenv("PUSH_UNMUTED_GROUPS", "true").lower() == "true"
+DEFAULT_HIDE_MESSAGE_CONTENT = os.getenv("HIDE_MESSAGE_CONTENT", "false").lower() == "true"
 
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
@@ -144,17 +146,26 @@ def create_telegram_client() -> TelegramClient:
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
-        return {"push_enabled": True, "push_unmuted_groups": DEFAULT_PUSH_UNMUTED_GROUPS}
+        return {
+            "push_enabled": True,
+            "push_unmuted_groups": DEFAULT_PUSH_UNMUTED_GROUPS,
+            "hide_message_content": DEFAULT_HIDE_MESSAGE_CONTENT,
+        }
 
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
             state.setdefault("push_enabled", True)
             state.setdefault("push_unmuted_groups", DEFAULT_PUSH_UNMUTED_GROUPS)
+            state.setdefault("hide_message_content", DEFAULT_HIDE_MESSAGE_CONTENT)
             return state
     except Exception as e:
         logging.warning("读取状态文件失败，使用默认开启状态: %s", e)
-        return {"push_enabled": True, "push_unmuted_groups": DEFAULT_PUSH_UNMUTED_GROUPS}
+        return {
+            "push_enabled": True,
+            "push_unmuted_groups": DEFAULT_PUSH_UNMUTED_GROUPS,
+            "hide_message_content": DEFAULT_HIDE_MESSAGE_CONTENT,
+        }
 
 
 def save_state(state: dict):
@@ -182,6 +193,34 @@ def set_unmuted_group_push_enabled(enabled: bool):
     state = load_state()
     state["push_unmuted_groups"] = enabled
     save_state(state)
+
+
+def is_message_content_hidden() -> bool:
+    state = load_state()
+    return bool(state.get("hide_message_content", DEFAULT_HIDE_MESSAGE_CONTENT))
+
+
+def set_message_content_hidden(hidden: bool):
+    state = load_state()
+    state["hide_message_content"] = hidden
+    save_state(state)
+
+
+def status_text() -> str:
+    return "\n".join([
+        "Telegram Bark 当前状态：",
+        f"Bark 推送：{'开启 ✅' if is_push_enabled() else '关闭 🔕'}",
+        f"未静音群组普通消息：{'开启 ✅' if is_unmuted_group_push_enabled() else '关闭 🔕'}",
+        f"推送消息内容：{'隐藏 🔒' if is_message_content_hidden() else '显示 👀'}",
+        f"自己发出的消息：{'推送 ✅' if PUSH_SELF_MESSAGES else '忽略 🚫'}",
+        f"最大内容长度：{MAX_BODY_LEN}",
+        f"Telegram 代理：{TG_PROXY_URL or '未启用'}",
+        f"Bark 代理：{BARK_PROXY_URL or '未启用'}",
+        f"Bark 服务端：{BARK_SERVER}",
+        f"Bark 图标：{BARK_ICON}",
+        f"Session：{TG_SESSION}",
+        f"状态文件：{STATE_FILE}",
+    ])
 
 
 def shorten(text: str, limit: int = MAX_BODY_LEN) -> str:
@@ -230,6 +269,22 @@ def message_summary(event) -> str:
         return "[贴纸]"
 
     return "[非文本消息]"
+
+
+def build_push_content(event, reason: str, chat_name: str, sender_name: str) -> tuple[str, str]:
+    content = "点击查看" if is_message_content_hidden() else message_summary(event)
+
+    if event.is_private:
+        title = sender_name
+        body = content
+    else:
+        title = chat_name
+        body = f"{sender_name}: {content}"
+
+    if reason:
+        title = f"{title}｜{reason}"
+
+    return title, body
 
 
 def has_username_mention(text: str) -> bool:
@@ -315,6 +370,8 @@ async def handle_saved_messages_command(event) -> bool:
     /status
     /group_on
     /group_off
+    /show_msg
+    /hide_msg
     /help
     """
 
@@ -344,12 +401,7 @@ async def handle_saved_messages_command(event) -> bool:
         return True
 
     if text == "/status":
-        status = "开启 ✅" if is_push_enabled() else "关闭 🔕"
-        group_status = "开启 ✅" if is_unmuted_group_push_enabled() else "关闭 🔕"
-        await event.reply(
-            f"当前 Bark 推送状态：{status}\n"
-            f"未静音群组普通消息推送：{group_status}"
-        )
+        await event.reply(status_text())
         logging.info("收到 Saved Messages 命令：查看状态")
         return True
 
@@ -365,6 +417,18 @@ async def handle_saved_messages_command(event) -> bool:
         logging.info("收到 Saved Messages 命令：关闭未静音群组普通消息推送")
         return True
 
+    if text == "/show_msg":
+        set_message_content_hidden(False)
+        await event.reply("👀 推送将显示 Telegram 消息内容")
+        logging.info("收到 Saved Messages 命令：显示推送消息内容")
+        return True
+
+    if text == "/hide_msg":
+        set_message_content_hidden(True)
+        await event.reply("🔒 推送将隐藏 Telegram 消息内容")
+        logging.info("收到 Saved Messages 命令：隐藏推送消息内容")
+        return True
+
     if text == "/help":
         await event.reply(
             "Telegram Bark 控制命令：\n\n"
@@ -373,6 +437,8 @@ async def handle_saved_messages_command(event) -> bool:
             "/status 查看当前状态\n"
             "/group_on 开启未静音群组普通消息推送\n"
             "/group_off 关闭未静音群组普通消息推送\n"
+            "/show_msg 推送显示消息内容\n"
+            "/hide_msg 推送隐藏消息内容\n"
             "/help 查看帮助\n\n"
             "说明：这些命令只在 Telegram 收藏夹 / Saved Messages 里生效。"
         )
@@ -391,7 +457,7 @@ async def push_bark(title: str, body: str, url: Optional[str] = None) -> bool:
         "body": body,
         "group": "Telegram",
         "sound": "healthnotification",
-        "icon": "https://cdn.nodeimage.com/i/zjy7G6Nv4ENdd927CAN8D0AY5WXDG2iw.webp",
+        "icon": BARK_ICON,
     }
 
     if url:
@@ -441,14 +507,7 @@ async def on_new_message(event):
         chat_name = display_name(chat)
         sender_name = display_name(sender)
 
-        content = "点击查看"
-
-        title = f"Telegram｜{reason}"
-
-        if event.is_private:
-            body = f"{sender_name}: {content}"
-        else:
-            body = f"{chat_name}\n{sender_name}: {content}"
+        title, body = build_push_content(event, reason, chat_name, sender_name)
 
         logging.info("准备推送: %s | %s", title, body)
         await push_bark(title, body, "tg://")
@@ -469,6 +528,7 @@ async def main():
     logging.info("启动 Telegram -> Bark 监听程序")
     logging.info("当前 Bark 推送状态: %s", "开启" if is_push_enabled() else "关闭")
     logging.info("未静音群组普通消息推送: %s", "开启" if is_unmuted_group_push_enabled() else "关闭")
+    logging.info("推送消息内容: %s", "隐藏" if is_message_content_hidden() else "显示")
 
     client = create_telegram_client()
     client.add_event_handler(on_new_message, events.NewMessage)
