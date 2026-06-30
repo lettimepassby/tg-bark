@@ -3,12 +3,26 @@ import re
 import json
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 import aiohttp
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
-from telethon.tl.types import User, Chat, Channel
+from telethon.tl.functions.account import GetNotifySettingsRequest
+from telethon.network.connection import ConnectionTcpAbridged
+from telethon.tl.types import User, Chat, Channel, InputNotifyPeer
+
+try:
+    import socks
+except ImportError:  # pragma: no cover - 运行时给出清晰错误
+    socks = None
+
+try:
+    from aiohttp_socks import ProxyConnector
+except ImportError:  # pragma: no cover - 运行时给出清晰错误
+    ProxyConnector = None
 
 
 load_dotenv()
@@ -24,27 +38,123 @@ MY_USERNAME = os.getenv("MY_USERNAME", "").lstrip("@").lower()
 
 MAX_BODY_LEN = int(os.getenv("MAX_BODY_LEN", "500"))
 PUSH_SELF_MESSAGES = os.getenv("PUSH_SELF_MESSAGES", "false").lower() == "true"
+DEFAULT_PUSH_UNMUTED_GROUPS = os.getenv("PUSH_UNMUTED_GROUPS", "true").lower() == "true"
 
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
+
+# Hysteria2 本身通常以本地 HTTP/SOCKS5 代理端口对外提供服务。
+# 设置 HYSTERIA2_PROXY=socks5://127.0.0.1:1080 即可让 Telegram 与 Bark 请求走代理。
+HYSTERIA2_PROXY = os.getenv("HYSTERIA2_PROXY", "").strip()
+PROXY_URL = os.getenv("PROXY_URL", HYSTERIA2_PROXY).strip()
+TG_PROXY_URL = os.getenv("TG_PROXY_URL", PROXY_URL).strip()
+BARK_PROXY_URL = os.getenv("BARK_PROXY_URL", PROXY_URL).strip()
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-client = TelegramClient(TG_SESSION, TG_API_ID, TG_API_HASH)
+
+def parse_proxy_url(proxy_url: str):
+    if not proxy_url:
+        return None
+
+    parsed = urlparse(proxy_url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname
+    port = parsed.port
+
+    if not scheme or not host or not port:
+        raise ValueError(f"代理地址格式错误: {proxy_url}")
+
+    return parsed
+
+
+def build_telegram_proxy(proxy_url: str):
+    parsed = parse_proxy_url(proxy_url)
+    if not parsed:
+        return None
+
+    if socks is None:
+        raise RuntimeError("使用 Telegram 代理需要安装 PySocks：pip install PySocks")
+
+    proxy_types = {
+        "socks5": socks.SOCKS5,
+        "socks5h": socks.SOCKS5,
+        "socks4": socks.SOCKS4,
+        "http": socks.HTTP,
+        "https": socks.HTTP,
+    }
+
+    proxy_type = proxy_types.get(parsed.scheme.lower())
+    if proxy_type is None:
+        raise ValueError("Telegram 代理仅支持 socks5、socks5h、socks4、http、https")
+
+    rdns = parsed.scheme.lower() in {"socks5", "socks5h"}
+    return (
+        proxy_type,
+        parsed.hostname,
+        parsed.port,
+        rdns,
+        parsed.username,
+        parsed.password,
+    )
+
+
+def build_bark_connector(proxy_url: str):
+    if not proxy_url:
+        return None
+
+    parsed = parse_proxy_url(proxy_url)
+    if parsed.scheme.lower().startswith("socks"):
+        if ProxyConnector is None:
+            raise RuntimeError("使用 SOCKS 代理推送 Bark 需要安装 aiohttp-socks：pip install aiohttp-socks")
+        return ProxyConnector.from_url(proxy_url)
+
+    return None
+
+
+TELEGRAM_PROXY = build_telegram_proxy(TG_PROXY_URL)
+if TELEGRAM_PROXY:
+    tg_proxy = urlparse(TG_PROXY_URL)
+    logging.info("Telegram 已启用代理: %s://%s:%s", tg_proxy.scheme, tg_proxy.hostname, tg_proxy.port)
+
+client: Optional[TelegramClient] = None
+
+
+def create_telegram_client() -> TelegramClient:
+    """
+    在当前运行中的 asyncio loop 内创建 Telethon client。
+
+    不要在模块加载阶段创建全局 TelegramClient，否则在 Linux/venv 下容易出现
+    “Future attached to a different loop”，并且重连/中断时表现异常。
+    """
+    return TelegramClient(
+        TG_SESSION,
+        TG_API_ID,
+        TG_API_HASH,
+        proxy=TELEGRAM_PROXY,
+        connection=ConnectionTcpAbridged,
+        timeout=30,
+        request_retries=5,
+        connection_retries=None,
+        retry_delay=5,
+    )
 
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
-        return {"push_enabled": True}
+        return {"push_enabled": True, "push_unmuted_groups": DEFAULT_PUSH_UNMUTED_GROUPS}
 
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+            state.setdefault("push_enabled", True)
+            state.setdefault("push_unmuted_groups", DEFAULT_PUSH_UNMUTED_GROUPS)
+            return state
     except Exception as e:
         logging.warning("读取状态文件失败，使用默认开启状态: %s", e)
-        return {"push_enabled": True}
+        return {"push_enabled": True, "push_unmuted_groups": DEFAULT_PUSH_UNMUTED_GROUPS}
 
 
 def save_state(state: dict):
@@ -60,6 +170,17 @@ def is_push_enabled() -> bool:
 def set_push_enabled(enabled: bool):
     state = load_state()
     state["push_enabled"] = enabled
+    save_state(state)
+
+
+def is_unmuted_group_push_enabled() -> bool:
+    state = load_state()
+    return bool(state.get("push_unmuted_groups", DEFAULT_PUSH_UNMUTED_GROUPS))
+
+
+def set_unmuted_group_push_enabled(enabled: bool):
+    state = load_state()
+    state["push_unmuted_groups"] = enabled
     save_state(state)
 
 
@@ -135,6 +256,32 @@ async def is_reply_to_me(event) -> bool:
         return False
 
 
+async def is_unmuted_group(event) -> bool:
+    if not is_unmuted_group_push_enabled():
+        return False
+
+    if not event.is_group:
+        return False
+
+    try:
+        input_chat = await event.get_input_chat()
+        settings = await client(GetNotifySettingsRequest(peer=InputNotifyPeer(input_chat)))
+        mute_until = getattr(settings, "mute_until", None)
+
+        if not mute_until:
+            return True
+
+        if isinstance(mute_until, datetime):
+            if mute_until.tzinfo is None:
+                mute_until = mute_until.replace(tzinfo=timezone.utc)
+            return mute_until <= datetime.now(timezone.utc)
+
+        return int(mute_until) <= 0
+    except Exception as e:
+        logging.warning("检查群组静音状态失败: %s", e)
+        return False
+
+
 async def should_push(event) -> tuple[bool, str]:
     if event.out and not PUSH_SELF_MESSAGES:
         return False, "忽略自己发出的消息"
@@ -153,6 +300,9 @@ async def should_push(event) -> tuple[bool, str]:
     if await is_reply_to_me(event):
         return True, "回复你"
 
+    if await is_unmuted_group(event):
+        return True, "未静音群组"
+
     return False, "非私聊且未@你"
 
 
@@ -163,6 +313,8 @@ async def handle_saved_messages_command(event) -> bool:
     /on
     /off
     /status
+    /group_on
+    /group_off
     /help
     """
 
@@ -193,8 +345,24 @@ async def handle_saved_messages_command(event) -> bool:
 
     if text == "/status":
         status = "开启 ✅" if is_push_enabled() else "关闭 🔕"
-        await event.reply(f"当前 Bark 推送状态：{status}")
+        group_status = "开启 ✅" if is_unmuted_group_push_enabled() else "关闭 🔕"
+        await event.reply(
+            f"当前 Bark 推送状态：{status}\n"
+            f"未静音群组普通消息推送：{group_status}"
+        )
         logging.info("收到 Saved Messages 命令：查看状态")
+        return True
+
+    if text == "/group_on":
+        set_unmuted_group_push_enabled(True)
+        await event.reply("✅ 未静音群组普通消息推送已开启")
+        logging.info("收到 Saved Messages 命令：开启未静音群组普通消息推送")
+        return True
+
+    if text == "/group_off":
+        set_unmuted_group_push_enabled(False)
+        await event.reply("🔕 未静音群组普通消息推送已关闭")
+        logging.info("收到 Saved Messages 命令：关闭未静音群组普通消息推送")
         return True
 
     if text == "/help":
@@ -203,6 +371,8 @@ async def handle_saved_messages_command(event) -> bool:
             "/on 开启推送\n"
             "/off 关闭推送\n"
             "/status 查看当前状态\n"
+            "/group_on 开启未静音群组普通消息推送\n"
+            "/group_off 关闭未静音群组普通消息推送\n"
             "/help 查看帮助\n\n"
             "说明：这些命令只在 Telegram 收藏夹 / Saved Messages 里生效。"
         )
@@ -214,6 +384,7 @@ async def handle_saved_messages_command(event) -> bool:
 
 async def push_bark(title: str, body: str, url: Optional[str] = None) -> bool:
     api_url = f"{BARK_SERVER}/{BARK_KEY}"
+    aiohttp_proxy = BARK_PROXY_URL if BARK_PROXY_URL and not urlparse(BARK_PROXY_URL).scheme.lower().startswith("socks") else None
 
     payload = {
         "title": title,
@@ -228,8 +399,9 @@ async def push_bark(title: str, body: str, url: Optional[str] = None) -> bool:
 
     for i in range(3):
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload, timeout=10) as resp:
+            connector = build_bark_connector(BARK_PROXY_URL)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(api_url, json=payload, proxy=aiohttp_proxy, timeout=10) as resp:
                     resp_text = await resp.text()
                     if resp.status == 200:
                         logging.info("Bark推送成功: %s", title)
@@ -249,7 +421,6 @@ async def push_bark(title: str, body: str, url: Optional[str] = None) -> bool:
     return False
 
 
-@client.on(events.NewMessage)
 async def on_new_message(event):
     try:
         if await handle_saved_messages_command(event):
@@ -287,6 +458,8 @@ async def on_new_message(event):
 
 
 async def main():
+    global client
+
     if not TG_API_ID or not TG_API_HASH:
         raise RuntimeError("请先在 .env 里配置 TG_API_ID 和 TG_API_HASH")
 
@@ -295,6 +468,10 @@ async def main():
 
     logging.info("启动 Telegram -> Bark 监听程序")
     logging.info("当前 Bark 推送状态: %s", "开启" if is_push_enabled() else "关闭")
+    logging.info("未静音群组普通消息推送: %s", "开启" if is_unmuted_group_push_enabled() else "关闭")
+
+    client = create_telegram_client()
+    client.add_event_handler(on_new_message, events.NewMessage)
 
     await client.start()
 
